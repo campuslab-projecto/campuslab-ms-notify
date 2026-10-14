@@ -1,528 +1,337 @@
-# \# campuslab-ms-notify
-
-# 
-
-# Microservicio Spring Boot encargado de consumir mensajes RabbitMQ para notificaciones, preparación de tickets y generación de vouchers dentro de CampusLab.
-
-# 
-
-# \## Tecnologías
-
-# 
-
-# \- Java 17
-
-# \- Spring Boot 3.2.3
-
-# \- Spring AMQP
-
-# \- RabbitMQ
-
-# \- Maven
-
-# \- Docker
-
-# 
-
-# \## Puerto
-
-# 
-
-# ```text
-
-# 8083
-
-# ```
-
-# 
-
-# \## Responsabilidad
-
-# 
-
-# Este microservicio consume mensajes publicados por `campuslab-ms-bookings` mediante RabbitMQ.
-
-# 
-
-# Flujo general:
-
-# 
-
-# ```text
-
-# campuslab-ms-bookings
-
-# &#x20;       |
-
-# &#x20;       | publica eventos
-
-# &#x20;       v
-
-# &#x20;    RabbitMQ
-
-# &#x20;       |
-
-# &#x20;       | entrega mensajes
-
-# &#x20;       v
-
 # campuslab-ms-notify
 
-# ```
+Microservicio Spring Boot encargado de consumir mensajes RabbitMQ para notificaciones, preparación de tickets y generación de vouchers dentro de CampusLab.
 
-# 
+## Tecnologías
 
-# \## Colas consumidas
+- Java 17
+- Spring Boot 3.2.3
+- Spring AMQP
+- RabbitMQ
+- Maven
+- Docker
 
-# 
+## Puerto
 
-# | Cola | Función |
+El microservicio se ejecuta en:
 
-# |---|---|
+```text
+8083
+```
 
-# | `q.cmd.email` | Procesamiento de notificaciones por email |
+## Responsabilidad
 
-# | `q.cmd.prep` | Preparación de tickets |
+`campuslab-ms-notify` consume mensajes publicados por `campuslab-ms-bookings` mediante RabbitMQ.
 
-# | `q.cmd.voucher` | Procesamiento de vouchers |
+Flujo general:
 
-# 
+```text
+campuslab-ms-bookings
+        |
+        | publica eventos
+        v
+     RabbitMQ
+        |
+        | entrega mensajes
+        v
+campuslab-ms-notify
+```
 
-# \## Dead Letter Queues
+## Colas consumidas
 
-# 
+| Cola | Función |
+|---|---|
+| `q.cmd.email` | Procesamiento de notificaciones por email |
+| `q.cmd.prep` | Preparación de tickets |
+| `q.cmd.voucher` | Procesamiento de vouchers |
 
-# | Cola principal | DLQ |
+## Dead Letter Queues
 
-# |---|---|
+| Cola principal | DLQ |
+|---|---|
+| `q.cmd.email` | `q.cmd.email.dlq` |
+| `q.cmd.prep` | `q.cmd.prep.dlq` |
+| `q.cmd.voucher` | `q.cmd.voucher.dlq` |
 
-# | `q.cmd.email` | `q.cmd.email.dlq` |
+Las colas principales utilizan el exchange de mensajes fallidos:
 
-# | `q.cmd.prep` | `q.cmd.prep.dlq` |
+```text
+cmd.dead.dlx
+```
 
-# | `q.cmd.voucher` | `q.cmd.voucher.dlq` |
+Cada cola principal configura además una routing key específica para su respectiva DLQ.
 
-# 
+## Configuración centralizada
 
-# Las colas principales utilizan:
+Los nombres utilizados por RabbitMQ se encuentran centralizados en:
 
-# 
+```text
+src/main/resources/application.yml
+```
 
-# ```text
+Ejemplo:
 
-# x-dead-letter-exchange = cmd.dead.dlx
+```yaml
+campuslab:
+  rabbitmq:
+    exchanges:
+      dead: cmd.dead.dlx
 
-# ```
+    queues:
+      email: q.cmd.email
+      prep: q.cmd.prep
+      voucher: q.cmd.voucher
 
-# 
+      email-dlq: q.cmd.email.dlq
+      prep-dlq: q.cmd.prep.dlq
+      voucher-dlq: q.cmd.voucher.dlq
+```
 
-# y una routing key específica para cada DLQ.
+Esto evita dejar nombres de colas o exchanges escritos directamente en la lógica de negocio.
 
-# 
+## Consumidores
 
-# \## Configuración centralizada
+Los consumidores se encuentran en:
 
-# 
+```text
+src/main/java/cl/duoc/campuslab/notify/messaging/consumer
+```
 
-# Los nombres de exchanges y colas se encuentran centralizados en:
+Clases implementadas:
 
-# 
+- `EmailConsumer`
+- `PrepConsumer`
+- `VoucherConsumer`
 
-# ```text
+Cada consumidor utiliza `@RabbitListener` para escuchar su cola correspondiente.
 
-# src/main/resources/application.yml
+Ejemplo:
 
-# ```
+```java
+@RabbitListener(
+        queues = "${campuslab.rabbitmq.queues.email}",
+        ackMode = "MANUAL"
+)
+```
 
-# 
+## Confirmación de mensajes
 
-# Ejemplo:
+Los consumidores utilizan confirmación manual de mensajes.
 
-# 
+Cuando el procesamiento es correcto:
 
-# ```yaml
+```java
+channel.basicAck(deliveryTag, false);
+```
 
-# campuslab:
+Cuando ocurre un error:
 
-# &#x20; rabbitmq:
+```java
+channel.basicNack(
+        deliveryTag,
+        false,
+        false
+);
+```
 
-# &#x20;   exchanges:
+El último parámetro en `false` evita reencolar indefinidamente el mensaje y permite que RabbitMQ lo derive a la DLQ configurada.
 
-# &#x20;     dead: cmd.dead.dlx
+## Manejo de errores
 
-# 
+Cada consumidor encapsula el procesamiento dentro de un bloque `try/catch`.
 
-# &#x20;   queues:
+En caso de éxito:
 
-# &#x20;     email: q.cmd.email
+```text
+ACK enviado
+```
 
-# &#x20;     prep: q.cmd.prep
+En caso de error:
 
-# &#x20;     voucher: q.cmd.voucher
+```text
+NACK enviado
+Mensaje derivado a DLQ
+```
 
-# &#x20;     email-dlq: q.cmd.email.dlq
+Esto permite controlar explícitamente el flujo de mensajes fallidos.
 
-# &#x20;     prep-dlq: q.cmd.prep.dlq
+## Envelope de mensajes
 
-# &#x20;     voucher-dlq: q.cmd.voucher.dlq
+Los eventos consumidos utilizan el DTO:
 
-# ```
+```text
+BookingEventMessage
+```
 
-# 
+El mensaje contiene los siguientes campos:
 
-# \## Consumidores
+| Campo | Descripción |
+|---|---|
+| `bookingId` | Identificador de la reserva |
+| `status` | Estado actual de la reserva |
+| `type` | Tipo de evento |
+| `message` | Descripción del evento |
+| `eventId` | Identificador único del evento |
+| `traceId` | Identificador de trazabilidad |
+| `correlationId` | Relación entre mensajes de una misma reserva |
+| `timestamp` | Fecha y hora de generación del evento |
 
-# 
+Esto permite mantener trazabilidad entre el productor y los consumidores.
 
-# Los consumidores se encuentran en:
+## Ejemplo de procesamiento exitoso
 
-# 
+Ejemplo de log generado al consumir una notificación:
 
-# ```text
+```text
+EMAIL recibido:
+Reserva ID: 1
+Estado: SOLICITADA
+Tipo: BOOKING_CREATED
+Mensaje: Reserva creada correctamente
+Event ID: ...
+Trace ID: ...
+Correlation ID: booking-1
+Timestamp: ...
+Email procesado correctamente. ACK enviado.
+```
 
-# src/main/java/cl/duoc/campuslab/notify/messaging/consumer
+## Evidencia de manejo de errores y DLQ
 
-# ```
+Se realizó una prueba controlada provocando un error durante el procesamiento de un voucher.
 
-# 
+El consumidor registró:
 
-# Clases:
+```text
+Error procesando voucher: Fallo controlado para probar DLQ
+NACK enviado. Mensaje derivado a DLQ.
+```
 
-# 
+Posteriormente se verificó RabbitMQ con:
 
-# ```text
+```powershell
+docker exec campuslab-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+```
 
-# EmailConsumer
+Resultado relevante:
 
-# PrepConsumer
+```text
+q.cmd.voucher.dlq    1    0
+```
 
-# VoucherConsumer
+Esto evidencia que el mensaje fallido fue derivado correctamente hacia la Dead Letter Queue.
 
-# ```
+Flujo comprobado:
 
-# 
+```text
+Mensaje
+   |
+   v
+VoucherConsumer
+   |
+   | error
+   v
+NACK
+   |
+   v
+cmd.dead.dlx
+   |
+   v
+q.cmd.voucher.dlq
+```
 
-# Todos utilizan:
+El fallo controlado utilizado para la prueba fue eliminado posteriormente del código final.
 
-# 
+## Variables de entorno
 
-# ```java
+El microservicio utiliza variables de entorno para conectarse a RabbitMQ.
 
-# @RabbitListener
+| Variable | Descripción | Valor local |
+|---|---|---|
+| `RABBITMQ_HOST` | Host del servidor RabbitMQ | `rabbitmq` |
+| `RABBITMQ_PORT` | Puerto de RabbitMQ | `5672` |
+| `RABBITMQ_USERNAME` | Usuario de conexión | `campuslab` |
+| `RABBITMQ_PASSWORD` | Contraseña de conexión | `campuslab123` |
 
-# ```
+Estas variables se inyectan desde `docker-compose.yml`, permitiendo que el contenedor se conecte al broker RabbitMQ dentro de la red Docker.
 
-# 
+## Compilación
 
-# con modo de confirmación manual:
+Para compilar el proyecto:
 
-# 
+```powershell
+.\mvnw.cmd clean package
+```
 
-# ```text
+Resultado esperado:
 
-# ackMode = MANUAL
+```text
+BUILD SUCCESS
+```
 
-# ```
+## Docker
 
-# 
+Para construir la imagen:
 
-# \## ACK y NACK
+```powershell
+docker build -t lukmezac/campuslab-ms-notify:latest .
+```
 
-# 
+El contenedor expone el puerto:
 
-# Cuando un mensaje es procesado correctamente se ejecuta:
+```text
+8083
+```
 
-# 
+## Integración con CampusLab
 
-# ```java
+El flujo implementado es:
 
-# channel.basicAck(deliveryTag, false);
+```text
+campuslab-ms-bookings
+        |
+        | publica eventos
+        v
+     RabbitMQ
+        |
+        +----------------------+
+        |                      |
+        v                      v
+ q.cmd.email              q.cmd.prep
+        |                      |
+        v                      v
+ EmailConsumer            PrepConsumer
 
-# ```
+        |
+        v
+ q.cmd.voucher
+        |
+        v
+ VoucherConsumer
+```
 
-# 
+En caso de fallo:
 
-# Cuando ocurre un error se ejecuta:
+```text
+Consumer
+   |
+   | NACK
+   v
+cmd.dead.dlx
+   |
+   v
+DLQ correspondiente
+```
 
-# 
+## Estado
 
-# ```java
+El microservicio se encuentra implementado y probado localmente con:
 
-# channel.basicNack(
-
-# &#x20;       deliveryTag,
-
-# &#x20;       false,
-
-# &#x20;       false
-
-# );
-
-# ```
-
-# 
-
-# El último parámetro en `false` evita reencolar indefinidamente el mensaje y permite su derivación a la DLQ configurada.
-
-# 
-
-# \## Envelope de mensajes
-
-# 
-
-# Los eventos utilizan el DTO:
-
-# 
-
-# ```text
-
-# BookingEventMessage
-
-# ```
-
-# 
-
-# con los siguientes campos:
-
-# 
-
-# ```text
-
-# bookingId
-
-# status
-
-# type
-
-# message
-
-# eventId
-
-# traceId
-
-# correlationId
-
-# timestamp
-
-# ```
-
-# 
-
-# Esto permite mantener información de trazabilidad entre productor y consumidor.
-
-# 
-
-# \## Ejemplo de procesamiento exitoso
-
-# 
-
-# ```text
-
-# EMAIL recibido:
-
-# Reserva ID: 1
-
-# Estado: SOLICITADA
-
-# Tipo: BOOKING\_CREATED
-
-# Event ID: ...
-
-# Trace ID: ...
-
-# Correlation ID: booking-1
-
-# Email procesado correctamente. ACK enviado.
-
-# ```
-
-# 
-
-# \## Evidencia de manejo de errores y DLQ
-
-# 
-
-# Se realizó una prueba controlada provocando un error en el procesamiento de un voucher.
-
-# 
-
-# Resultado registrado en logs:
-
-# 
-
-# ```text
-
-# Error procesando voucher: Fallo controlado para probar DLQ
-
-# NACK enviado. Mensaje derivado a DLQ.
-
-# ```
-
-# 
-
-# Posteriormente se verificó RabbitMQ:
-
-# 
-
-# ```text
-
-# q.cmd.voucher.dlq    messages\_ready=1    messages\_unacknowledged=0
-
-# ```
-
-# 
-
-# Esto demuestra el flujo:
-
-# 
-
-# ```text
-
-# Mensaje
-
-# &#x20;  |
-
-# &#x20;  v
-
-# VoucherConsumer
-
-# &#x20;  |
-
-# &#x20;  | error
-
-# &#x20;  v
-
-# NACK
-
-# &#x20;  |
-
-# &#x20;  v
-
-# cmd.dead.dlx
-
-# &#x20;  |
-
-# &#x20;  v
-
-# q.cmd.voucher.dlq
-
-# ```
-
-# 
-
-# El fallo utilizado para la prueba fue eliminado posteriormente del código final.
-
-# 
-
-# \## Compilación
-
-# 
-
-# ```powershell
-
-# .\\mvnw.cmd clean package
-
-# ```
-
-# 
-
-# Resultado esperado:
-
-# 
-
-# ```text
-
-# BUILD SUCCESS
-
-# ```
-
-# 
-
-# \## Docker
-
-# 
-
-# Construcción de imagen:
-
-# 
-
-# ```powershell
-
-# docker build -t lukmezac/campuslab-ms-notify:latest .
-
-# ```
-
-# 
-
-# El servicio se ejecuta en el puerto:
-
-# 
-
-# ```text
-
-# 8083
-
-# ```
-
-# 
-
-# \## Variables de entorno
-
-# 
-
-# ```text
-
-# RABBITMQ\_HOST
-
-# RABBITMQ\_PORT
-
-# RABBITMQ\_USERNAME
-
-# RABBITMQ\_PASSWORD
-
-# ```
-
-# 
-
-# Valores locales utilizados:
-
-# 
-
-# ```text
-
-# RABBITMQ\_HOST=rabbitmq
-
-# RABBITMQ\_PORT=5672
-
-# RABBITMQ\_USERNAME=campuslab
-
-# RABBITMQ\_PASSWORD=campuslab123
-
-# ```
-
-# 
-
-# \## Estado
-
-# 
-
-# Implementado y probado localmente con:
-
-# 
-
-# \- consumo RabbitMQ
-
-# \- `@RabbitListener`
-
-# \- ACK manual
-
-# \- NACK manual
-
-# \- envío a DLQ
-
-# \- trazabilidad mediante envelope
-
-# \- configuración centralizada
-
-# \- ejecución mediante Docker
-
+- consumo mediante RabbitMQ
+- consumidores con `@RabbitListener`
+- ACK manual
+- NACK manual
+- manejo explícito de errores
+- envío de mensajes fallidos a DLQ
+- trazabilidad mediante envelope de eventos
+- configuración centralizada
+- ejecución mediante Docker
