@@ -1,0 +1,26 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: campuslab-ms-notify
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:campuslab}
+    password: ${RABBITMQ_PASSWORD:campuslab123}
+
+campuslab:
+  rabbitmq:
+    exchanges:
+      dead: cmd.dead.dlx
+
+    queues:
+      email: q.cmd.email
+      prep: q.cmd.prep
+      voucher: q.cmd.voucher
+
+      email-dlq: q.cmd.email.dlq
+      prep-dlq: q.cmd.prep.dlq
+      voucher-dlq: q.cmd.voucher.dlq
